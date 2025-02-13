@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "keypad.h"
+#include "ring_buffer.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,7 +44,7 @@
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-
+uint8_t rx_byte; 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,12 +63,65 @@ uint16_t column_pressed = 0;
 uint32_t debounce_tick = 0;
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  if ((debounce_tick + 200) > HAL_GetTick()) {
+  if ((HAL_GetTick() - debounce_tick) < 150) { // 150 ms timeout
     return;
   }
   debounce_tick = HAL_GetTick();
   key_pressed_tick = HAL_GetTick();
   column_pressed = GPIO_Pin;
+}
+// Command definitions --------------------------------
+#define COMMAND_LENGTH 5
+const char CMD_OPEN[] = "#*A*#";
+const char CMD_CLOSE[] = "#*C*#";
+const char CMD_STATUS[] = "#*1*#";
+const char CMD_CLEAR[] = "#*0*#";
+ring_buffer_t rx_buffer;
+uint8_t rx_buffer_mem[64];
+char current_cmd[COMMAND_LENGTH];
+uint8_t cmd_index = 0;
+
+// UART asociated Callback
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart == &huart2) {
+      ring_buffer_write(&rx_buffer, rx_byte);
+      HAL_UART_Transmit(&huart2, &rx_byte, 1, 100); 
+      HAL_UART_Receive_IT(&huart2, &rx_byte, 1);
+  }
+}
+
+// New helper function
+void uart_send_string(const char *str) {
+  HAL_UART_Transmit(&huart2, (uint8_t *)str, strlen(str), 100);
+}
+
+//  Command processor
+void process_commands(void) {
+  uint8_t byte;
+  while (ring_buffer_read(&rx_buffer, &byte)) {
+      // Shift buffer left and append new byte
+      memmove(current_cmd, current_cmd + 1, COMMAND_LENGTH - 1);
+      current_cmd[COMMAND_LENGTH - 1] = (char)byte;
+
+      // Check for full command match
+      if (memcmp(current_cmd, CMD_OPEN, COMMAND_LENGTH) == 0) {
+          HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_SET);
+          uart_send_string("\r\nSend command #*A*#\r\nDoor open (turn ON LD2)\r\n");
+          memset(current_cmd, 0, COMMAND_LENGTH); // Reset buffer
+      } else if (memcmp(current_cmd, CMD_CLOSE, COMMAND_LENGTH) == 0) {
+          HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+          uart_send_string("\r\nSend command #*C*#\r\nDoor closed (turn OFF LD2)\r\n");
+          memset(current_cmd, 0, COMMAND_LENGTH);
+      } else if (memcmp(current_cmd, CMD_STATUS, COMMAND_LENGTH) == 0) {
+          uint8_t state = HAL_GPIO_ReadPin(LD2_GPIO_Port, LD2_Pin);
+          uart_send_string(state ? "\r\nSend command #*1*#\r\nDoor status: open (LD2 ON)\r\n" : "Send command #*1*#\r\nDoor status: closed (LD2 OFF)\r\n");
+          memset(current_cmd, 0, COMMAND_LENGTH);
+      } else if (memcmp(current_cmd, CMD_CLEAR, COMMAND_LENGTH) == 0) {
+          ring_buffer_reset(&rx_buffer);
+          uart_send_string("\r\nSend command #*0*#\r\nRing buffer clear command: The buffer is empty\r\n");
+          memset(current_cmd, 0, COMMAND_LENGTH);
+      }
+  }
 }
 
 /* USER CODE END 0 */
@@ -109,13 +163,17 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     keypad_init();
-    HAL_UART_Transmit(&huart2, (uint8_t *)"Hello World\n", 12, 100);
+    ring_buffer_init(&rx_buffer, rx_buffer_mem, sizeof(rx_buffer_mem));
+    memset(current_cmd, 0, COMMAND_LENGTH);
+    HAL_UART_Receive_IT(&huart2, &rx_byte, 1); // Start UART interrupt
     while (1) {
       if (column_pressed != 0 && (key_pressed_tick + 5) < HAL_GetTick() ) {
         uint8_t key = keypad_scan(column_pressed);
+        ring_buffer_write(&rx_buffer, key);
         HAL_UART_Transmit(&huart2, &key, 1, 100);
         column_pressed = 0;
       }
+      process_commands(); 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

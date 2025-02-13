@@ -4,7 +4,9 @@
 void ring_buffer_init(ring_buffer_t *rb, uint8_t *mem_add, uint8_t capacity) {
     rb->buffer = mem_add;
     rb->capacity = capacity;
-    ring_buffer_reset(rb);
+    rb->head = 0;
+    rb->tail = 0;
+    rb->is_full = 0;
 }
 
 void ring_buffer_reset(ring_buffer_t *rb) {
